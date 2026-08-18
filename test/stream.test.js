@@ -192,6 +192,86 @@ describe("translateStream", () => {
     expect(events.at(-2).data.delta.stop_reason).toBe("end_turn");
   });
 
+  it("omits thought parts unless thinking was requested", async () => {
+    const { upstream } = fakeUpstream([
+      sse({ candidates: [{ content: { parts: [{ text: "hidden", thought: true }, { text: "shown" }] } }] }),
+      sse({ candidates: [{ finishReason: "STOP" }] }),
+    ]);
+    const events = await collect(translateStream(upstream, { model: "m" }));
+    expect(events.filter((e) => e.event === "content_block_delta").map((e) => e.data.delta.text)).toEqual(["shown"]);
+  });
+
+  it("streams a thinking block ahead of the answer", async () => {
+    const { upstream } = fakeUpstream([
+      sse({ candidates: [{ content: { parts: [{ text: "step one ", thought: true }] } }] }),
+      sse({ candidates: [{ content: { parts: [{ text: "step two", thought: true, thoughtSignature: "c2ln" }] } }] }),
+      sse({ candidates: [{ content: { parts: [{ text: "answer" }] } }] }),
+      sse({ candidates: [{ finishReason: "STOP" }] }),
+    ]);
+    const events = await collect(translateStream(upstream, { model: "m", includeThinking: true }));
+
+    expect(events.map((e) => e.event)).toEqual([
+      "message_start",
+      "content_block_start",
+      "content_block_delta",
+      "content_block_delta",
+      "content_block_delta",
+      "content_block_stop",
+      "content_block_start",
+      "content_block_delta",
+      "content_block_stop",
+      "message_delta",
+      "message_stop",
+    ]);
+
+    const [thinkingStart, answerStart] = events.filter((e) => e.event === "content_block_start");
+    expect(thinkingStart.data.content_block).toEqual({ type: "thinking", thinking: "" });
+    expect(thinkingStart.data.index).toBe(0);
+    expect(answerStart.data.content_block).toEqual({ type: "text", text: "" });
+    expect(answerStart.data.index).toBe(1);
+
+    const deltas = events.filter((e) => e.event === "content_block_delta").map((e) => e.data.delta);
+    expect(deltas).toEqual([
+      { type: "thinking_delta", thinking: "step one " },
+      { type: "thinking_delta", thinking: "step two" },
+      // Anthropic delivers the signature as the last delta of the block.
+      { type: "signature_delta", signature: "c2ln" },
+      { type: "text_delta", text: "answer" },
+    ]);
+  });
+
+  it("accepts a signature arriving in its own thought part", async () => {
+    const { upstream } = fakeUpstream([
+      sse({ candidates: [{ content: { parts: [{ text: "thinking", thought: true }] } }] }),
+      sse({ candidates: [{ content: { parts: [{ thought: true, thoughtSignature: "c2ln" }] } }] }),
+      sse({ candidates: [{ finishReason: "STOP" }] }),
+    ]);
+    const events = await collect(translateStream(upstream, { model: "m", includeThinking: true }));
+    const deltas = events.filter((e) => e.event === "content_block_delta").map((e) => e.data.delta);
+    expect(deltas.at(-1)).toEqual({ type: "signature_delta", signature: "c2ln" });
+  });
+
+  it("emits no signature_delta when Gemini sends no signature", async () => {
+    const { upstream } = fakeUpstream([
+      sse({ candidates: [{ content: { parts: [{ text: "thinking", thought: true }] } }] }),
+      sse({ candidates: [{ finishReason: "STOP" }] }),
+    ]);
+    const events = await collect(translateStream(upstream, { model: "m", includeThinking: true }));
+    expect(events.some((e) => e.data.delta?.type === "signature_delta")).toBe(false);
+  });
+
+  it("does not withhold thinking text for stop-sequence matching", async () => {
+    // Stop sequences apply to the answer, not the thought summary.
+    const { upstream } = fakeUpstream([
+      sse({ candidates: [{ content: { parts: [{ text: "considering END", thought: true }] } }] }),
+      sse({ candidates: [{ finishReason: "STOP" }] }),
+    ]);
+    const events = await collect(translateStream(upstream, { model: "m", includeThinking: true, stopSequences: ["END"] }));
+    const deltas = events.filter((e) => e.data.delta?.type === "thinking_delta").map((e) => e.data.delta.thinking);
+    expect(deltas).toEqual(["considering END"]);
+    expect(events.at(-2).data.delta.stop_reason).toBe("end_turn");
+  });
+
   it("aborts the upstream when the client hangs up", async () => {
     const { upstream, cancelled } = fakeUpstream([sse(textChunk("hi"))], { keepOpen: true });
     const abortController = new AbortController();

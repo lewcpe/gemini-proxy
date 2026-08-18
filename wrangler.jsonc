@@ -5,6 +5,9 @@
   "compatibility_date": "2026-07-01",
   "vars": {
     "GEMINI_MODEL_ID": "gemini-3.7-flash",
+    // Service tier for Gemini inference (e.g. "flex", "priority", "standard").
+    // "flex" provides 50% discount for variable latency. Empty means default (standard).
+    "SERVICE_TIER": "flex",
     // Comma-separated browser origins allowed to call the proxy. Empty means no
     // CORS headers at all, which is correct for CLI/SDK clients.
     "ALLOWED_ORIGINS": "",
@@ -18,9 +21,18 @@
   //   GEMINI_API_KEY  upstream Google AI Studio key
   //   PROXY_API_KEY   key callers must present; the worker refuses to serve without it
   "observability": {
-    "enabled": true
-  },
-  "limits": {
-    "cpu_ms": 30000
+    "enabled": true,
+    "head_sampling_rate": 1,
+    "logs": {
+      "enabled": true,
+      "head_sampling_rate": 1,
+      "persist": true,
+      "invocation_logs": true
+    },
+    "traces": {
+      "enabled": true,
+      "persist": true,
+      "head_sampling_rate": 1
+    }
   }
 }

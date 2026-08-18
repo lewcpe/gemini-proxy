@@ -33,9 +33,13 @@ It lets clients built for the Claude / Anthropic API (OpenCode, LiteLLM, VS Code
 - **Multimodal** — base64 inline images (`image/png`, `image/jpeg`, `image/webp`, `image/heic`, `image/heif`).
 - **Error mapping** — Gemini HTTP errors become Anthropic error objects (`rate_limit_error`, `invalid_request_error`, ...).
 
+- **Thinking blocks** — Gemini thought summaries are returned as Anthropic `thinking` content blocks (streaming and non-streaming) and replayed back upstream on later turns. See below.
+- **Flex Mode & Service Tiers** — configure `SERVICE_TIER="flex"` globally or supply `service_tier: "flex"` per request for 50% API cost discount.
+
 ### Known gaps
 
-- **Thinking blocks are not returned.** Gemini's thought parts are dropped rather than surfaced as Anthropic `thinking` content blocks. `thinking` in a *request* is still honoured and mapped to Gemini's `thinkingLevel` / `thinkingBudget`.
+- **Streamed thinking blocks are usually unsigned.** Gemini emits the turn's `thoughtSignature` on a trailing part *after* the answer text, by which point the thinking block has closed and its `signature_delta` has already been sent. Non-streaming responses do carry the signature. This is harmless: Gemini accepts unsigned thought parts replayed in history.
+- **`redacted_thinking` blocks are dropped** on the way upstream — the payload is opaque Anthropic-side data with nothing to reconstruct from.
 - **`cache_creation_input_tokens` is always `0`.** Gemini's implicit caching has no explicit write step to report.
 - **Claude model ids are aliases.** Requesting `claude-sonnet-4-5` serves `GEMINI_MODEL_ID`; the response echoes the requested name back, so downstream cost dashboards will attribute usage to a Claude model that was never called.
 - **Schema constraint keywords are dropped** (`minimum`, `pattern`, `minItems`, ...) rather than forwarded. They are advisory for the model, and forwarding them has been observed to 400.
@@ -80,6 +84,7 @@ npm run deploy
 | `GEMINI_API_KEY` | secret | — | Google AI Studio key. Required. |
 | `PROXY_API_KEY` | secret | — | Key callers must present. Required; the worker refuses to serve without it. |
 | `GEMINI_MODEL_ID` | var | `gemini-3.7-flash` | Model used for any non-`gemini*` requested model. |
+| `SERVICE_TIER` | var | *(empty)* | Inference service tier (e.g. `flex` for 50% discount / variable latency, `priority`, `standard`). |
 | `GEMINI_ALLOWED_MODELS` | var | *(empty)* | Comma-separated allow list of upstream models. Empty means any valid `gemini*` id. |
 | `ALLOWED_ORIGINS` | var | *(empty)* | Comma-separated CORS origins, or `*`. Empty means no CORS headers. |
 | `MAX_REQUEST_BYTES` | var | `10485760` | Request body ceiling. |
@@ -176,6 +181,16 @@ toolu_<uuid>__ts__<base64url(thoughtSignature)>
 ```
 
 On `tool_result` the signature is unpacked and reattached to the Gemini `functionCall` part. An id whose tail is not valid base64url is treated as a plain id, so client-generated ids that happen to contain the separator still round-trip.
+
+### Thinking blocks
+
+Thinking is gated on the request, matching Anthropic's semantics: `thinking` blocks come back only when the request carried `thinking: {"type": "enabled"}`. That flag also sets Gemini's `includeThoughts`, without which Gemini returns no thought parts at all.
+
+The mapping is not one-to-one. Gemini splits a thought summary across several parts and attaches the turn's `thoughtSignature` to a *trailing* part that carries no `thought` flag — typically the answer part, not the thought. Consecutive thought parts are merged into one Anthropic `thinking` block and that trailing signature is backfilled onto it, since a thinking block is the only Anthropic content block able to carry one.
+
+Signatures are never invented. Gemini rejects a fabricated signature with `Corrupted thought signature`, whereas an *absent* one is accepted, so an unsigned thinking block is replayed as a plain unsigned thought part.
+
+On the way back upstream, `{"type": "thinking", "thinking": ..., "signature": ...}` becomes `{"text": ..., "thought": true, "thoughtSignature": ...}`.
 
 ### Schema sanitization
 

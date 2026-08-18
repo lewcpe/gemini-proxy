@@ -41,14 +41,53 @@ export function detectStopSequence(text, stopSequences) {
   return null;
 }
 
-export function toAnthropicResponse(geminiResponse, requestedModel, stopSequences) {
+// Gemini splits a thought summary across several parts and may attach the
+// signature to any of them, so consecutive thought parts collapse into one
+// Anthropic thinking block carrying the last signature seen.
+function appendThinking(content, part) {
+  const text = typeof part.text === "string" ? part.text : "";
+  const last = content[content.length - 1];
+  if (last?.type === "thinking") {
+    last.thinking += text;
+    if (part.thoughtSignature) last.signature = part.thoughtSignature;
+    return;
+  }
+  if (!text) return;
+  content.push({ type: "thinking", thinking: text, signature: part.thoughtSignature ?? "" });
+}
+
+// Gemini emits the turn's thoughtSignature on a trailing part that is usually
+// empty text and carries no `thought` flag — not on the thought part itself.
+// Anthropic has nowhere to put a signature except a thinking block, so it is
+// backfilled onto the most recent one. Verified against the API: replaying a
+// real signature on a thought part is accepted, with or without the answer
+// text alongside it. (A *fabricated* signature is rejected outright, so one is
+// never invented.)
+function backfillSignature(content, signature) {
+  for (let i = content.length - 1; i >= 0; i--) {
+    if (content[i].type === "thinking") {
+      content[i].signature = signature;
+      return;
+    }
+  }
+}
+
+export function toAnthropicResponse(geminiResponse, requestedModel, options = {}) {
+  const { stopSequences, includeThinking = false } = options;
   const candidate = geminiResponse?.candidates?.[0];
   const parts = candidate?.content?.parts ?? [];
   const content = [];
   let hasToolUse = false;
 
   for (const part of parts) {
-    if (!part || part.thought) continue;
+    if (!part) continue;
+    if (part.thought) {
+      if (includeThinking) appendThinking(content, part);
+      continue;
+    }
+    if (includeThinking && part.thoughtSignature && !part.functionCall) {
+      backfillSignature(content, part.thoughtSignature);
+    }
     if (typeof part.text === "string") {
       if (!part.text) continue;
       const last = content[content.length - 1];

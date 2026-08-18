@@ -232,6 +232,76 @@ describe("responses", () => {
   });
 });
 
+describe("thinking", () => {
+  const thoughtReply = {
+    candidates: [
+      {
+        content: {
+          parts: [{ text: "weighing it up", thought: true, thoughtSignature: "c2ln" }, { text: "the answer" }],
+        },
+        finishReason: "STOP",
+      },
+    ],
+    usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 4, thoughtsTokenCount: 6 },
+  };
+
+  it("asks Gemini for thought summaries only when thinking is enabled", async () => {
+    await worker.fetch(post("/v1/messages", MESSAGE_BODY), ENV);
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body).generationConfig?.thinkingConfig?.includeThoughts).toBeUndefined();
+
+    fetchMock.mockClear();
+    await worker.fetch(post("/v1/messages", { ...MESSAGE_BODY, thinking: { type: "enabled", budget_tokens: 16000 } }), ENV);
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body).generationConfig.thinkingConfig).toEqual({
+      thinkingLevel: "high",
+      includeThoughts: true,
+    });
+  });
+
+  it("returns thinking blocks end to end", async () => {
+    fetchMock.mockResolvedValueOnce(geminiReply(thoughtReply));
+    const response = await worker.fetch(
+      post("/v1/messages", { ...MESSAGE_BODY, thinking: { type: "enabled", budget_tokens: 1024 } }),
+      ENV,
+    );
+    const payload = await response.json();
+    expect(payload.content).toEqual([
+      { type: "thinking", thinking: "weighing it up", signature: "c2ln" },
+      { type: "text", text: "the answer" },
+    ]);
+    expect(payload.usage.output_tokens).toBe(10);
+  });
+
+  it("withholds thinking blocks when the client did not ask for them", async () => {
+    fetchMock.mockResolvedValueOnce(geminiReply(thoughtReply));
+    const payload = await (await worker.fetch(post("/v1/messages", MESSAGE_BODY), ENV)).json();
+    expect(payload.content).toEqual([{ type: "text", text: "the answer" }]);
+  });
+
+  it("round-trips a thinking block back to Gemini as a signed thought part", async () => {
+    const body = {
+      ...MESSAGE_BODY,
+      thinking: { type: "enabled", budget_tokens: 1024 },
+      messages: [
+        { role: "user", content: "hi" },
+        {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "weighing it up", signature: "c2ln" },
+            { type: "text", text: "the answer" },
+          ],
+        },
+        { role: "user", content: "why?" },
+      ],
+    };
+    await worker.fetch(post("/v1/messages", body), ENV);
+    const sent = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(sent.contents[1].parts).toEqual([
+      { text: "weighing it up", thought: true, thoughtSignature: "c2ln" },
+      { text: "the answer" },
+    ]);
+  });
+});
+
 describe("models endpoint", () => {
   it("returns the Anthropic list shape, not OpenAI's", async () => {
     const payload = await (await worker.fetch(get("/v1/models"), ENV)).json();
@@ -304,5 +374,20 @@ describe("routing", () => {
   it("serves the unversioned aliases", async () => {
     expect((await worker.fetch(post("/messages", MESSAGE_BODY), ENV)).status).toBe(200);
     expect((await worker.fetch(get("/models"), ENV)).status).toBe(200);
+  });
+});
+
+describe("flex mode", () => {
+  it("forwards service_tier: flex to Gemini when configured in SERVICE_TIER env", async () => {
+    const env = { ...ENV, SERVICE_TIER: "flex" };
+    await worker.fetch(post("/v1/messages", MESSAGE_BODY), env);
+    const sent = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(sent.service_tier).toBe("flex");
+  });
+
+  it("forwards service_tier: flex to Gemini when passed in request body", async () => {
+    await worker.fetch(post("/v1/messages", { ...MESSAGE_BODY, service_tier: "flex" }), ENV);
+    const sent = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(sent.service_tier).toBe("flex");
   });
 });

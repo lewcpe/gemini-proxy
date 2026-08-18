@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   imageSourceToPart,
+  resolveServiceTier,
   toFunctionDeclarations,
   toGeminiContents,
   toGeminiRequest,
@@ -36,7 +37,7 @@ describe("toGeminiContents", () => {
         {
           role: "assistant",
           content: [
-            { type: "thinking", thinking: "hmm" },
+            { type: "redacted_thinking", data: "opaque" },
             { type: "text", text: "hi" },
           ],
         },
@@ -44,6 +45,34 @@ describe("toGeminiContents", () => {
       "m",
     );
     expect(contents[0].parts).toEqual([{ text: "hi" }]);
+  });
+
+  it("replays a thinking block as a signed thought part", () => {
+    const contents = toGeminiContents(
+      [
+        {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "hmm", signature: "c2ln" },
+            { type: "text", text: "hi" },
+          ],
+        },
+      ],
+      "gemini-3.7-flash",
+    );
+    expect(contents[0].parts).toEqual([{ text: "hmm", thought: true, thoughtSignature: "c2ln" }, { text: "hi" }]);
+  });
+
+  it("replays an unsigned thinking block without a signature field", () => {
+    const contents = toGeminiContents(
+      [{ role: "assistant", content: [{ type: "thinking", thinking: "hmm", signature: "" }] }],
+      "gemini-3.7-flash",
+    );
+    expect(contents[0].parts).toEqual([{ text: "hmm", thought: true }]);
+  });
+
+  it("drops an empty thinking block", () => {
+    expect(toGeminiContents([{ role: "assistant", content: [{ type: "thinking", thinking: "" }] }], "m")).toEqual([]);
   });
 
   it("forwards the function call id and thought signature for gemini-3", () => {
@@ -157,12 +186,27 @@ describe("toSystemText", () => {
 
 describe("toThinkingConfig", () => {
   it("maps a budget to a gemini-3 thinking level", () => {
-    expect(toThinkingConfig({ type: "enabled", budget_tokens: 16000 }, "gemini-3.7-flash")).toEqual({ thinkingLevel: "high" });
-    expect(toThinkingConfig({ type: "enabled", budget_tokens: 1000 }, "gemini-3.7-flash")).toEqual({ thinkingLevel: "low" });
+    expect(toThinkingConfig({ type: "enabled", budget_tokens: 16000 }, "gemini-3.7-flash")).toEqual({
+      thinkingLevel: "high",
+      includeThoughts: true,
+    });
+    expect(toThinkingConfig({ type: "enabled", budget_tokens: 1000 }, "gemini-3.7-flash")).toEqual({
+      thinkingLevel: "low",
+      includeThoughts: true,
+    });
+  });
+
+  it("requests thought summaries only when thinking is enabled", () => {
+    // Without includeThoughts, Gemini returns no thought parts at all.
+    expect(toThinkingConfig(undefined, "gemini-3.7-flash").includeThoughts).toBeUndefined();
+    expect(toThinkingConfig({ type: "disabled" }, "gemini-2.5-pro").includeThoughts).toBeUndefined();
   });
 
   it("uses a token budget for older models", () => {
-    expect(toThinkingConfig({ type: "enabled", budget_tokens: 1000 }, "gemini-2.5-pro")).toEqual({ thinkingBudget: 1000 });
+    expect(toThinkingConfig({ type: "enabled", budget_tokens: 1000 }, "gemini-2.5-pro")).toEqual({
+      thinkingBudget: 1000,
+      includeThoughts: true,
+    });
     expect(toThinkingConfig({ type: "disabled" }, "gemini-2.5-pro")).toEqual({ thinkingBudget: 0 });
   });
 
@@ -254,5 +298,35 @@ describe("toGeminiRequest", () => {
     );
     expect(request.tools[0].functionDeclarations).toHaveLength(1);
     expect(request.toolConfig).toEqual({ functionCallingConfig: { mode: "ANY" } });
+  });
+
+  it("includes service_tier when set in request body or options", () => {
+    const requestFromEnv = toGeminiRequest({ messages: [{ role: "user", content: "hi" }] }, "gemini-3.7-flash", {
+      env: { SERVICE_TIER: "flex" },
+    });
+    expect(requestFromEnv.service_tier).toBe("flex");
+
+    const requestFromBody = toGeminiRequest(
+      { messages: [{ role: "user", content: "hi" }], service_tier: "flex" },
+      "gemini-3.7-flash",
+    );
+    expect(requestFromBody.service_tier).toBe("flex");
+  });
+});
+
+describe("resolveServiceTier", () => {
+  it("prioritizes body service_tier over env", () => {
+    expect(resolveServiceTier({ service_tier: "flex" }, { env: { SERVICE_TIER: "standard" } })).toBe("flex");
+    expect(resolveServiceTier({ serviceTier: "flex" })).toBe("flex");
+    expect(resolveServiceTier({ extra_body: { service_tier: "flex" } })).toBe("flex");
+  });
+
+  it("falls back to env SERVICE_TIER", () => {
+    expect(resolveServiceTier({}, { env: { SERVICE_TIER: "flex" } })).toBe("flex");
+    expect(resolveServiceTier({}, { env: { GEMINI_SERVICE_TIER: "flex" } })).toBe("flex");
+  });
+
+  it("returns null when no service tier is specified", () => {
+    expect(resolveServiceTier({}, {})).toBeNull();
   });
 });
