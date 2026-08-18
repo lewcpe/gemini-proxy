@@ -4,9 +4,23 @@
   "main": "src/index.js",
   "compatibility_date": "2026-07-01",
   "vars": {
-    "GEMINI_MODEL_ID": "gemini-3.7-flash"
+    "GEMINI_MODEL_ID": "gemini-3.7-flash",
+    // Comma-separated browser origins allowed to call the proxy. Empty means no
+    // CORS headers at all, which is correct for CLI/SDK clients.
+    "ALLOWED_ORIGINS": "",
+    // Optional comma-separated allow list of upstream Gemini model ids. Empty
+    // means any syntactically valid gemini-* id the caller asks for.
+    "GEMINI_ALLOWED_MODELS": "",
+    "MAX_REQUEST_BYTES": "10485760",
+    "UPSTREAM_TIMEOUT_MS": "120000"
   },
+  // Secrets, set with `wrangler secret put` — never in this file:
+  //   GEMINI_API_KEY  upstream Google AI Studio key
+  //   PROXY_API_KEY   key callers must present; the worker refuses to serve without it
   "observability": {
     "enabled": true
+  },
+  "limits": {
+    "cpu_ms": 30000
   }
 }

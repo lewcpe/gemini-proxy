@@ -1,60 +1,89 @@
 # Cloudflare Worker Anthropic-to-Gemini Proxy
 
-A lightweight, high-performance Cloudflare Worker proxy that translates the **Anthropic Messages API** (`/v1/messages`) to Google AI Studio's **Gemini API** (`generateContent` & `streamGenerateContent`).
+A Cloudflare Worker that translates the **Anthropic Messages API** (`/v1/messages`) to Google AI Studio's **Gemini API** (`generateContent` & `streamGenerateContent`).
 
-It allows clients designed for Claude / Anthropic API (such as OpenCode, LiteLLM, VS Code extensions, or the official Anthropic SDK) to use Google Gemini models (e.g., `gemini-3.7-flash`, `gemini-3.6-flash`) seamlessly without modifying client code.
+It lets clients built for the Claude / Anthropic API (OpenCode, LiteLLM, VS Code extensions, the official Anthropic SDKs) drive Gemini models without changing client code.
+
+---
+
+## Security model
+
+**The proxy spends your Gemini API key on behalf of whoever can reach it.** `*.workers.dev` hostnames are enumerable and routinely scanned, so it is designed to fail closed:
+
+- **`PROXY_API_KEY` is required.** Callers present it via `x-api-key` or `Authorization: Bearer`. Without the secret configured, the worker serves `500` rather than becoming an open relay. Comparison is constant-time over SHA-256 digests, so neither the key nor its length leaks through timing.
+- **Model ids are validated** against an anchored pattern and percent-encoded before being interpolated into the upstream URL. Without this, `gemini/../tunedModels/foo` reaches unrelated `generativelanguage.googleapis.com` resources on your key.
+- **CORS is off by default.** Set `ALLOWED_ORIGINS` only if a browser needs to call the proxy directly; a wildcard plus a client-held key means any page can spend your quota.
+- **Request bodies are capped** (`MAX_REQUEST_BYTES`) and **upstream calls time out** (`UPSTREAM_TIMEOUT_MS`).
+- **Optional model allow list** via `GEMINI_ALLOWED_MODELS` restricts which upstream models callers may select.
+
+`/health` is intentionally unauthenticated for uptime checks and reveals no configuration.
 
 ---
 
 ## Features
 
-- **Full Anthropic Messages API Compatibility**: Supports `/v1/messages` and `/messages` endpoints for non-streaming JSON responses and SSE (`text/event-stream`) streaming.
-- **Model Discovery Endpoint**: `GET /v1/models` and `GET /models` list available models (including `claude-sonnet-4-5`, `claude-3-7-sonnet-20250219`, `gemini-3.7-flash`, and `gemini-3.6-flash`).
-- **Tool Calling & Round-Trip Support**: Translates Anthropic `tools` and `tool_choice` into Gemini `functionDeclarations` and `toolConfig`.
-- **Gemini 3 Thought Signature Preservation**: Automatically embeds Gemini 3 `thoughtSignature` into `tool_use_id` (`toolu_...__ts__<base64url>`) to preserve function call verification signatures across multi-turn tool interactions.
-- **Robust JSON Schema Sanitizer**: Automatically cleans tool parameter schemas by stripping unsupported keywords (`propertyNames`, `exclusiveMinimum`, `exclusiveMaximum`, `patternProperties`, `$schema`, `additionalProperties`, etc.), converting `const` to `enum: [val]`, and filtering `required` arrays against `properties`.
-- **Prompt Caching Reporting**: Maps Gemini's implicit context caching token metadata (`cachedContentTokenCount` for prompts $\ge 4,096$ tokens) to Anthropic's `cache_read_input_tokens` and `cache_creation_input_tokens` fields in the `usage` object.
-- **Gemini 3 Thinking Config**: Translates Anthropic thinking requests into Gemini 3 `thinkingLevel` (`high` / `low`).
-- **Multimodal Support**: Base64 inline image support (`image/png`, `image/jpeg`, `image/webp`, `image/gif`).
-- **Standardized Error Mapping**: Converts Gemini upstream HTTP errors (400, 401, 404, 429, 529) to Anthropic JSON error formats (`rate_limit_error`, `invalid_request_error`, etc.).
+- **Anthropic Messages API compatibility** — `/v1/messages` and `/messages`, non-streaming JSON and SSE streaming.
+- **Token counting** — `/v1/messages/count_tokens`, backed by Gemini `:countTokens`. Required by Claude Code and `client.messages.count_tokens()`.
+- **Model discovery** — `GET /v1/models` in Anthropic's list shape.
+- **Tool calling & round-trips** — Anthropic `tools` / `tool_choice` to Gemini `functionDeclarations` / `toolConfig`.
+- **Gemini 3 thought-signature preservation** — signatures are packed into `tool_use.id` so they survive multi-turn tool use.
+- **JSON Schema sanitizer** — inlines `$ref`, merges `allOf`, collapses `anyOf: [X, null]` to `nullable`, and strips keywords Gemini rejects.
+- **Accurate usage accounting** — cached tokens are reported as `cache_read_input_tokens` and excluded from `input_tokens`.
+- **Stop sequences** — forwarded to Gemini; if a matched sequence reaches the output it is stripped and reported via `stop_reason` / `stop_sequence`, in both streaming and non-streaming modes. See the caveat below.
+- **Multimodal** — base64 inline images (`image/png`, `image/jpeg`, `image/webp`, `image/heic`, `image/heif`).
+- **Error mapping** — Gemini HTTP errors become Anthropic error objects (`rate_limit_error`, `invalid_request_error`, ...).
+
+### Known gaps
+
+- **Thinking blocks are not returned.** Gemini's thought parts are dropped rather than surfaced as Anthropic `thinking` content blocks. `thinking` in a *request* is still honoured and mapped to Gemini's `thinkingLevel` / `thinkingBudget`.
+- **`cache_creation_input_tokens` is always `0`.** Gemini's implicit caching has no explicit write step to report.
+- **Claude model ids are aliases.** Requesting `claude-sonnet-4-5` serves `GEMINI_MODEL_ID`; the response echoes the requested name back, so downstream cost dashboards will attribute usage to a Claude model that was never called.
+- **Schema constraint keywords are dropped** (`minimum`, `pattern`, `minItems`, ...) rather than forwarded. They are advisory for the model, and forwarding them has been observed to 400.
+- **`stop_reason: "stop_sequence"` is best-effort.** Gemini strips the matched sequence itself and reports `finishReason: "STOP"` for both a natural ending and a stop-sequence hit, so the two are indistinguishable upstream. In practice the generation *does* stop at the sequence and the sequence *is* absent from the output — but `stop_reason` will usually read `end_turn`. The proxy's stripping logic is a safety net for the case where a sequence does leak into the output.
 
 ---
 
 ## Quick Start
 
-### 1. Installation & Environment Setup
-
-Clone the repository and install dependencies:
-
 ```bash
 npm install
 ```
 
-Create a `.dev.vars` file for local development (or `.env`):
+Create `.dev.vars` for local development:
 
 ```env
 GEMINI_API_KEY=your_google_ai_studio_api_key
 GEMINI_MODEL_ID=gemini-3.7-flash
+PROXY_API_KEY=a_long_random_string_clients_must_present
 ```
 
-### 2. Run Locally
-
-Start the local Wrangler development server:
+Generate a proxy key with `openssl rand -hex 32`.
 
 ```bash
-npm run dev
+npm run dev     # http://localhost:8787
+npm test        # offline unit suite
+npm run lint    # biome
 ```
 
-The proxy will run on `http://localhost:8787`.
-
-### 3. Deploy to Cloudflare Workers
-
-Set your Gemini API key in Cloudflare Workers secrets and deploy:
+### Deploy
 
 ```bash
 npx wrangler secret put GEMINI_API_KEY
+npx wrangler secret put PROXY_API_KEY
 npm run deploy
 ```
+
+### Configuration
+
+| Name | Kind | Default | Purpose |
+| --- | --- | --- | --- |
+| `GEMINI_API_KEY` | secret | — | Google AI Studio key. Required. |
+| `PROXY_API_KEY` | secret | — | Key callers must present. Required; the worker refuses to serve without it. |
+| `GEMINI_MODEL_ID` | var | `gemini-3.7-flash` | Model used for any non-`gemini*` requested model. |
+| `GEMINI_ALLOWED_MODELS` | var | *(empty)* | Comma-separated allow list of upstream models. Empty means any valid `gemini*` id. |
+| `ALLOWED_ORIGINS` | var | *(empty)* | Comma-separated CORS origins, or `*`. Empty means no CORS headers. |
+| `MAX_REQUEST_BYTES` | var | `10485760` | Request body ceiling. |
+| `UPSTREAM_TIMEOUT_MS` | var | `120000` | Timeout for the upstream connection. |
 
 ---
 
@@ -62,23 +91,16 @@ npm run deploy
 
 ### `POST /v1/messages` (or `/messages`)
 
-Translates Anthropic Messages requests to Gemini API.
-
-#### Request Example (Anthropic Format)
-
 ```bash
 curl http://localhost:8787/v1/messages \
   -H "Content-Type: application/json" \
+  -H "x-api-key: $PROXY_API_KEY" \
   -d '{
     "model": "claude-sonnet-4-5",
     "max_tokens": 300,
-    "messages": [
-      {"role": "user", "content": "Hello!"}
-    ]
+    "messages": [{"role": "user", "content": "Hello!"}]
   }'
 ```
-
-#### Response Example (Anthropic Format)
 
 ```json
 {
@@ -86,9 +108,7 @@ curl http://localhost:8787/v1/messages \
   "type": "message",
   "role": "assistant",
   "model": "claude-sonnet-4-5",
-  "content": [
-    { "type": "text", "text": "Hello! How can I help you today?" }
-  ],
+  "content": [{ "type": "text", "text": "Hello! How can I help you today?" }],
   "stop_reason": "end_turn",
   "stop_sequence": null,
   "usage": {
@@ -100,76 +120,86 @@ curl http://localhost:8787/v1/messages \
 }
 ```
 
----
+### `POST /v1/messages/count_tokens`
 
-### `GET /v1/models` (or `/models`)
+```json
+{ "input_tokens": 42 }
+```
 
-Returns available models for client discovery.
+### `GET /v1/models`
 
 ```json
 {
-  "object": "list",
   "data": [
-    { "id": "claude-sonnet-4-5", "object": "model", "created": 1700000000, "owned_by": "anthropic" },
-    { "id": "claude-3-5-sonnet-20241022", "object": "model", "created": 1700000000, "owned_by": "anthropic" },
-    { "id": "claude-3-7-sonnet-20250219", "object": "model", "created": 1700000000, "owned_by": "anthropic" },
-    { "id": "gemini-3.7-flash", "object": "model", "created": 1700000000, "owned_by": "google" },
-    { "id": "gemini-3.6-flash", "object": "model", "created": 1700000000, "owned_by": "google" }
-  ]
+    { "type": "model", "id": "gemini-3.7-flash", "display_name": "Gemini 3.7 Flash", "created_at": "2024-01-01T00:00:00Z" }
+  ],
+  "has_more": false,
+  "first_id": "gemini-3.7-flash",
+  "last_id": "claude-3-7-sonnet-20250219"
 }
 ```
-
----
 
 ### `GET /health` (or `/`)
 
-Health check endpoint.
-
-```json
-{
-  "ok": true,
-  "upstream": "google-ai-studio",
-  "model": "gemini-3.7-flash"
-}
-```
+Unauthenticated. `{ "ok": true, "upstream": "google-ai-studio" }`
 
 ---
 
-## Testing with Official Anthropic SDK
+## Layout
 
-You can test the proxy using Python's official `anthropic` client:
-
-```bash
-uv run --with anthropic python scripts/sdk_test.py
 ```
-
-`scripts/sdk_test.py` validates non-streaming text, SSE streaming text, tool calling, and multi-turn tool result round-trips.
+src/
+  index.js            routing, auth gate, upstream call, error mapping
+  auth.js             constant-time API key check
+  http.js             CORS, error/JSON responses, size-capped body reader
+  models.js           model id validation, allow list, model catalog
+  translate/
+    request.js        Anthropic request  -> Gemini generateContent
+    response.js       Gemini response    -> Anthropic message
+    stream.js         Gemini SSE         -> Anthropic SSE
+    schema.js         JSON Schema -> Gemini's OpenAPI subset
+    ids.js            tool_use id <-> thought signature packing
+test/                 offline unit suite (npm test)
+scripts/sdk_test.py   live smoke test against a running proxy
+```
 
 ---
 
 ## Technical Details
 
-### Thought Signature Round-Tripping
+### Thought-signature round-tripping
 
-Gemini 3 thinking models require the `thoughtSignature` from a previous tool call part to be present when submitting tool results in conversation history.
-
-The proxy encodes and decodes signatures directly within the `tool_use.id`:
+Gemini 3 requires the `thoughtSignature` from a previous tool call to be replayed when tool results are submitted. The Anthropic wire format has no field for it, so the proxy packs it into the id the client already echoes back:
 
 ```text
 toolu_<uuid>__ts__<base64url(thoughtSignature)>
 ```
 
-When receiving `tool_result`, the proxy extracts the signature and attaches `thoughtSignature` back onto the Gemini `functionCall` part in the content history.
+On `tool_result` the signature is unpacked and reattached to the Gemini `functionCall` part. An id whose tail is not valid base64url is treated as a plain id, so client-generated ids that happen to contain the separator still round-trip.
 
-### Schema Sanitization
+### Schema sanitization
 
-Gemini API rejects non-standard or unsupported JSON Schema keywords. The proxy sanitizes parameter schemas by:
-1. Stripping `$schema`, `$id`, `$ref`, `additionalProperties`, `propertyNames`, `patternProperties`, `exclusiveMinimum`, `exclusiveMaximum`, `minimum`, `maximum`, `minLength`, `maxLength`, `pattern`, `minItems`, `maxItems`, `uniqueItems`, `minProperties`, `maxProperties`, `dependentRequired`, `dependentSchemas`, `contains`, `title`, and `default`.
-2. Converting `const: "val"` to `enum: ["val"]`.
-3. Validating and filtering `required` property arrays so every required key exists in `properties`.
+Gemini accepts a narrow OpenAPI-flavoured subset of JSON Schema and rejects the whole request on an unknown keyword. The sanitizer:
+
+1. **Inlines `$ref`** against `#/$defs` and `#/definitions`, with cycle detection (recursive models terminate as untyped objects). Stripping the keyword instead — as an earlier version did — left an untyped `{}` that Gemini rejects, breaking every Pydantic/zod nested model.
+2. **Merges `allOf`**, rewrites `oneOf` to `anyOf`, and collapses `anyOf: [X, {type: "null"}]` (i.e. `Optional[X]`) to `X` plus `nullable: true`.
+3. **Strips unsupported keywords** and filters `format` to the values Gemini accepts, so `format: "uri"` no longer 400s a whole tool call.
+4. **Converts `const` to `enum: [value]`** and filters `required` against `properties`.
+5. **Guarantees a `type` on every node**, and omits `parameters` entirely for zero-argument tools.
+
+### Testing
+
+`npm test` runs an offline suite (no network, no API key) covering schema sanitization, request/response translation, SSE stream translation, id packing, auth, routing, and model-id validation.
+
+`scripts/sdk_test.py` is a live end-to-end check with the official Anthropic Python SDK; it spends real quota and is kept out of CI.
+
+```bash
+export PROXY_API_KEY=$(grep '^PROXY_API_KEY=' .dev.vars | cut -d= -f2)
+uv run --with anthropic python scripts/sdk_test.py
+```
 
 ---
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).
