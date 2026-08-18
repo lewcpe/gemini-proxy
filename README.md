@@ -34,6 +34,7 @@ It lets clients built for the Claude / Anthropic API (OpenCode, LiteLLM, VS Code
 - **Error mapping** — Gemini HTTP errors become Anthropic error objects (`rate_limit_error`, `invalid_request_error`, ...).
 
 - **Thinking blocks** — Gemini thought summaries are returned as Anthropic `thinking` content blocks (streaming and non-streaming) and replayed back upstream on later turns. See below.
+- **Flex Mode & Service Tiers** — configure `SERVICE_TIER="flex"` globally or supply `service_tier: "flex"` per request for 50% API cost discount.
 
 ### Known gaps
 
@@ -83,6 +84,7 @@ npm run deploy
 | `GEMINI_API_KEY` | secret | — | Google AI Studio key. Required. |
 | `PROXY_API_KEY` | secret | — | Key callers must present. Required; the worker refuses to serve without it. |
 | `GEMINI_MODEL_ID` | var | `gemini-3.7-flash` | Model used for any non-`gemini*` requested model. |
+| `SERVICE_TIER` | var | *(empty)* | Inference service tier (e.g. `flex` for 50% discount / variable latency, `priority`, `standard`). |
 | `GEMINI_ALLOWED_MODELS` | var | *(empty)* | Comma-separated allow list of upstream models. Empty means any valid `gemini*` id. |
 | `ALLOWED_ORIGINS` | var | *(empty)* | Comma-separated CORS origins, or `*`. Empty means no CORS headers. |
 | `MAX_REQUEST_BYTES` | var | `10485760` | Request body ceiling. |

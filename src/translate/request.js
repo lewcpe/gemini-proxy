@@ -3,8 +3,26 @@ import { isEmptyObjectSchema, sanitizeSchema } from "./schema.js";
 
 const SUPPORTED_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/heic", "image/heif"]);
 
-export function toGeminiRequest(body, model) {
+export function resolveServiceTier(body, options = {}) {
+  const fromBody = body?.service_tier ?? body?.serviceTier ?? body?.extra_body?.service_tier ?? body?.extra_body?.serviceTier;
+  if (typeof fromBody === "string" && fromBody.trim()) {
+    return fromBody.trim().toLowerCase();
+  }
+  const env = options?.env ?? options;
+  const fromEnv = env?.SERVICE_TIER ?? env?.GEMINI_SERVICE_TIER;
+  if (typeof fromEnv === "string" && fromEnv.trim()) {
+    return fromEnv.trim().toLowerCase();
+  }
+  return null;
+}
+
+export function toGeminiRequest(body, model, options = {}) {
   const request = { contents: toGeminiContents(body.messages, model) };
+
+  const serviceTier = resolveServiceTier(body, options);
+  if (serviceTier) {
+    request.service_tier = serviceTier;
+  }
 
   const systemText = toSystemText(body.system);
   if (systemText) {

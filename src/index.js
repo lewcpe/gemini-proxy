@@ -170,7 +170,7 @@ async function prepareRequest(request, env, cors, { requireMaxTokens = true } = 
     return { response: errorResponse(resolved.error.status, resolved.error.type, resolved.error.message, cors) };
   }
 
-  const geminiRequest = toGeminiRequest(body, resolved.model);
+  const geminiRequest = toGeminiRequest(body, resolved.model, { env });
   if (geminiRequest.contents.length === 0) {
     return {
       response: errorResponse(400, "invalid_request_error", "messages: no translatable content in any message", cors),

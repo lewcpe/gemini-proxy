@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   imageSourceToPart,
+  resolveServiceTier,
   toFunctionDeclarations,
   toGeminiContents,
   toGeminiRequest,
@@ -297,5 +298,35 @@ describe("toGeminiRequest", () => {
     );
     expect(request.tools[0].functionDeclarations).toHaveLength(1);
     expect(request.toolConfig).toEqual({ functionCallingConfig: { mode: "ANY" } });
+  });
+
+  it("includes service_tier when set in request body or options", () => {
+    const requestFromEnv = toGeminiRequest({ messages: [{ role: "user", content: "hi" }] }, "gemini-3.7-flash", {
+      env: { SERVICE_TIER: "flex" },
+    });
+    expect(requestFromEnv.service_tier).toBe("flex");
+
+    const requestFromBody = toGeminiRequest(
+      { messages: [{ role: "user", content: "hi" }], service_tier: "flex" },
+      "gemini-3.7-flash",
+    );
+    expect(requestFromBody.service_tier).toBe("flex");
+  });
+});
+
+describe("resolveServiceTier", () => {
+  it("prioritizes body service_tier over env", () => {
+    expect(resolveServiceTier({ service_tier: "flex" }, { env: { SERVICE_TIER: "standard" } })).toBe("flex");
+    expect(resolveServiceTier({ serviceTier: "flex" })).toBe("flex");
+    expect(resolveServiceTier({ extra_body: { service_tier: "flex" } })).toBe("flex");
+  });
+
+  it("falls back to env SERVICE_TIER", () => {
+    expect(resolveServiceTier({}, { env: { SERVICE_TIER: "flex" } })).toBe("flex");
+    expect(resolveServiceTier({}, { env: { GEMINI_SERVICE_TIER: "flex" } })).toBe("flex");
+  });
+
+  it("returns null when no service tier is specified", () => {
+    expect(resolveServiceTier({}, {})).toBeNull();
   });
 });

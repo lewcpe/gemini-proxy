@@ -376,3 +376,18 @@ describe("routing", () => {
     expect((await worker.fetch(get("/models"), ENV)).status).toBe(200);
   });
 });
+
+describe("flex mode", () => {
+  it("forwards service_tier: flex to Gemini when configured in SERVICE_TIER env", async () => {
+    const env = { ...ENV, SERVICE_TIER: "flex" };
+    await worker.fetch(post("/v1/messages", MESSAGE_BODY), env);
+    const sent = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(sent.service_tier).toBe("flex");
+  });
+
+  it("forwards service_tier: flex to Gemini when passed in request body", async () => {
+    await worker.fetch(post("/v1/messages", { ...MESSAGE_BODY, service_tier: "flex" }), ENV);
+    const sent = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(sent.service_tier).toBe("flex");
+  });
+});
