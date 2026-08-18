@@ -32,7 +32,7 @@ export async function* geminiSseEvents(reader) {
 }
 
 export function translateStream(upstream, options = {}) {
-  const { model: requestedModel, stopSequences = [], abortController = null } = options;
+  const { model: requestedModel, stopSequences = [], abortController = null, includeThinking = false } = options;
   const encoder = new TextEncoder();
   const messageId = newMessageId();
   const reader = upstream.body?.getReader() ?? null;
@@ -79,6 +79,15 @@ export function translateStream(upstream, options = {}) {
         if (!openBlock) return;
         if (openBlock.kind === "text") {
           flushPending();
+        } else if (openBlock.kind === "thinking") {
+          // Anthropic delivers the signature as a final delta before the stop.
+          if (openBlock.signature) {
+            send("content_block_delta", {
+              type: "content_block_delta",
+              index: blockIndex,
+              delta: { type: "signature_delta", signature: openBlock.signature },
+            });
+          }
         } else if (openBlock.kind === "tool_use") {
           send("content_block_delta", {
             type: "content_block_delta",
@@ -98,6 +107,17 @@ export function translateStream(upstream, options = {}) {
           type: "content_block_start",
           index: blockIndex,
           content_block: { type: "text", text: "" },
+        });
+      };
+
+      const openThinkingBlock = () => {
+        closeBlock();
+        blockIndex += 1;
+        openBlock = { kind: "thinking", signature: "" };
+        send("content_block_start", {
+          type: "content_block_start",
+          index: blockIndex,
+          content_block: { type: "thinking", thinking: "" },
         });
       };
 
@@ -218,7 +238,29 @@ export function translateStream(upstream, options = {}) {
           if (candidate.finishReason) finishReason = candidate.finishReason;
 
           for (const part of candidate.content?.parts ?? []) {
-            if (!part || part.thought) continue;
+            if (!part) continue;
+            if (part.thought) {
+              if (!includeThinking) continue;
+              // Note: Gemini usually sends the turn's signature on a trailing
+              // part *after* the answer text, by which point this block has
+              // closed and its signature_delta has already gone out. Streamed
+              // thinking blocks are therefore often unsigned. That is safe —
+              // Gemini accepts unsigned thought parts replayed in history.
+              const thought = typeof part.text === "string" ? part.text : "";
+              if (thought && openBlock?.kind !== "thinking") openThinkingBlock();
+              if (openBlock?.kind !== "thinking") continue;
+              // A trailing part may carry only the signature for the thought
+              // that preceded it.
+              if (part.thoughtSignature) openBlock.signature = part.thoughtSignature;
+              if (thought) {
+                send("content_block_delta", {
+                  type: "content_block_delta",
+                  index: blockIndex,
+                  delta: { type: "thinking_delta", thinking: thought },
+                });
+              }
+              continue;
+            }
             if (typeof part.text === "string") {
               if (!part.text) continue;
               if (openBlock?.kind !== "text") openTextBlock();

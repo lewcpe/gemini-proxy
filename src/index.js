@@ -1,7 +1,7 @@
 import { authorize } from "./auth.js";
 import { corsHeaders, errorResponse, jsonResponse, readJsonBody } from "./http.js";
 import { modelCatalog, resolveModel } from "./models.js";
-import { toGeminiRequest } from "./translate/request.js";
+import { thinkingEnabled, toGeminiRequest } from "./translate/request.js";
 import { toAnthropicResponse } from "./translate/response.js";
 import { translateStream } from "./translate/stream.js";
 
@@ -73,6 +73,7 @@ async function handleMessages(request, env, cors) {
       model: body.model,
       stopSequences: Array.isArray(body.stop_sequences) ? body.stop_sequences.filter((s) => typeof s === "string" && s) : [],
       abortController: controller,
+      includeThinking: thinkingEnabled(body),
     });
     return new Response(stream, {
       status: 200,
@@ -96,7 +97,11 @@ async function handleMessages(request, env, cors) {
     }
   }
 
-  return jsonResponse(toAnthropicResponse(geminiResponse, body.model, body.stop_sequences), cors);
+  const message = toAnthropicResponse(geminiResponse, body.model, {
+    stopSequences: body.stop_sequences,
+    includeThinking: thinkingEnabled(body),
+  });
+  return jsonResponse(message, cors);
 }
 
 async function handleCountTokens(request, env, cors) {

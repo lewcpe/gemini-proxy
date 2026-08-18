@@ -122,6 +122,62 @@ assert "4" not in "".join(b.text for b in stopped.content if b.type == "text")
 
 time.sleep(3)
 
+print(f"== thinking + round trip ({MODEL}) ==")
+thought = with_retry(
+    lambda: client.messages.create(
+        model=MODEL,
+        max_tokens=3000,
+        thinking={"type": "enabled", "budget_tokens": 16000},
+        messages=[{"role": "user", "content": "Explain step by step: a farmer has 17 sheep and all but 9 run away."}],
+    )
+)
+print([b.type for b in thought.content])
+thinking_block = next(b for b in thought.content if b.type == "thinking")
+assert thinking_block.thinking.strip()
+assert any(b.type == "text" for b in thought.content)
+
+time.sleep(3)
+
+# Echo the assistant turn back verbatim: Gemini rejects a mangled signature
+# outright, so this fails loudly if the id/signature packing ever breaks.
+followup = with_retry(
+    lambda: client.messages.create(
+        model=MODEL,
+        max_tokens=500,
+        thinking={"type": "enabled", "budget_tokens": 16000},
+        messages=[
+            {"role": "user", "content": "Explain step by step: a farmer has 17 sheep and all but 9 run away."},
+            {"role": "assistant", "content": [b.model_dump() for b in thought.content]},
+            {"role": "user", "content": "Now answer in exactly one word."},
+        ],
+    )
+)
+print(followup.stop_reason, [b.text for b in followup.content if b.type == "text"])
+assert any(b.type == "text" for b in followup.content)
+
+time.sleep(3)
+
+print(f"== thinking (streaming) ({MODEL}) ==")
+
+
+def run_thinking_stream():
+    with client.messages.stream(
+        model=MODEL,
+        max_tokens=3000,
+        thinking={"type": "enabled", "budget_tokens": 16000},
+        messages=[{"role": "user", "content": "Explain step by step why 0.1 + 0.2 != 0.3 in floats."}],
+    ) as stream:
+        for _ in stream.text_stream:
+            pass
+        return stream.get_final_message()
+
+
+streamed = with_retry(run_thinking_stream)
+print([b.type for b in streamed.content])
+assert any(b.type == "thinking" and b.thinking.strip() for b in streamed.content)
+
+time.sleep(3)
+
 print(f"== tool use + round trip ({MODEL}) ==")
 msg = with_retry(
     lambda: client.messages.create(

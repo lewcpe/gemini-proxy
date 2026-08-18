@@ -35,13 +35,21 @@ export function toGeminiRequest(body, model) {
   return request;
 }
 
+// Anthropic only returns thinking blocks when the request enabled thinking, so
+// this gates both the upstream includeThoughts flag and the response side.
+export function thinkingEnabled(body) {
+  return body?.thinking?.type === "enabled";
+}
+
 export function toThinkingConfig(thinking, model) {
   const isGemini3 = typeof model === "string" && model.includes("gemini-3");
   if (thinking && typeof thinking === "object" && thinking.type === "enabled") {
+    // Without includeThoughts, Gemini returns no thought parts at all and the
+    // response side would have nothing to translate.
     if (isGemini3) {
-      return { thinkingLevel: (thinking.budget_tokens ?? 0) >= 8192 ? "high" : "low" };
+      return { thinkingLevel: (thinking.budget_tokens ?? 0) >= 8192 ? "high" : "low", includeThoughts: true };
     }
-    return { thinkingBudget: thinking.budget_tokens ?? -1 };
+    return { thinkingBudget: thinking.budget_tokens ?? -1, includeThoughts: true };
   }
   if (isGemini3) return { thinkingLevel: "low" };
   if (thinking && typeof thinking === "object" && thinking.type === "disabled") {
@@ -112,8 +120,22 @@ function toGeminiParts(content, toolUseNames, model) {
       case "tool_result":
         parts.push(toFunctionResponsePart(block, toolUseNames, model));
         break;
+      case "thinking": {
+        // Replayed so Gemini 3 keeps thinking continuity across turns; the
+        // signature is what makes the replayed thought verifiable.
+        if (typeof block.thinking !== "string" || !block.thinking) break;
+        const part = { text: block.thinking, thought: true };
+        if (typeof block.signature === "string" && block.signature) {
+          part.thoughtSignature = block.signature;
+        }
+        parts.push(part);
+        break;
+      }
+      case "redacted_thinking":
+        // An opaque Anthropic-side payload with nothing to reconstruct from.
+        break;
       default:
-        // thinking, redacted_thinking, document, ... have no Gemini equivalent.
+        // document, search_result, ... have no Gemini equivalent.
         break;
     }
   }
