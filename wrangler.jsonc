@@ -1,0 +1,12 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "gemini-anthropic-proxy",
+  "main": "src/index.js",
+  "compatibility_date": "2026-07-01",
+  "vars": {
+    "GEMINI_MODEL_ID": "gemini-3.7-flash"
+  },
+  "observability": {
+    "enabled": true
+  }
+}
